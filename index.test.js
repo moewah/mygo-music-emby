@@ -594,6 +594,19 @@ function trackItem() {
   };
 }
 
+function traditionalTrackItem() {
+  return {
+    status: 200,
+    body: {
+      Id: "t2",
+      Name: "水星記",
+      Album: "飛行器的執行週期",
+      RunTimeTicks: 3253347850,
+      Artists: [{ Id: "ar1", Name: "郭頂" }],
+    },
+  };
+}
+
 test("lyrics come from LRCLIB and are kept", async () => {
   signedIn();
   let asked = 0;
@@ -625,13 +638,100 @@ test("lyrics come from LRCLIB and are kept", async () => {
   assert.equal(asked, 1);
 });
 
-test("lyrics fall back to lrcmux when LRCLIB has none", async () => {
+test("lyrics fall back to Vkeys when LRCLIB has none", async () => {
+  signedIn();
+  const hosts = [];
+  handler = (url) => {
+    if (url.hostname === "emby.test") return trackItem();
+    hosts.push(url.hostname);
+    if (url.hostname === "lrclib.net") {
+      return url.pathname === "/api/get" ? { status: 404, body: {} } : { status: 200, body: [] };
+    }
+    assert.equal(url.hostname, "api.vkeys.cn");
+    if (url.pathname === "/v2/music/tencent/search/song") {
+      assert.equal(url.searchParams.get("word"), "Test Song Test Artist");
+      assert.equal(url.searchParams.get("num"), "20");
+      return {
+        status: 200,
+        body: {
+          code: 200,
+          data: [
+            { id: 1, song: "Test Song", singer: "Someone Else", interval: "4分00秒" },
+            { id: 2, song: "Test Song", singer: "Test Artist", interval: "3分20秒" },
+          ],
+        },
+      };
+    }
+    assert.equal(url.pathname, "/v2/music/tencent/lyric");
+    assert.equal(url.searchParams.get("id"), "2");
+    return { status: 200, body: { code: 200, data: { lrc: "[00:05.00]The words" } } };
+  };
+
+  const page = await plugin.lyrics({ id: "t1" });
+  assert.equal(page.lrc, "[00:05.00]The words");
+  assert.ok(!hosts.includes("api.lrcmux.dev"));
+});
+
+test("a traditional title is searched again in simplified characters", async () => {
+  signedIn();
+  handler = (url) => {
+    if (url.hostname === "emby.test") return traditionalTrackItem();
+    assert.equal(url.hostname, "lrclib.net");
+    if (url.pathname === "/api/get") return { status: 404, body: {} };
+    if (url.searchParams.get("track_name") === "水星記") {
+      assert.equal(url.searchParams.get("artist_name"), "郭頂");
+      return { status: 200, body: [] };
+    }
+    assert.equal(url.searchParams.get("track_name"), "水星记");
+    assert.equal(url.searchParams.get("artist_name"), "郭顶");
+    return {
+      status: 200,
+      body: [{ trackName: "水星记", artistName: "郭顶", duration: 325, syncedLyrics: "[00:19.00]First line" }],
+    };
+  };
+
+  const page = await plugin.lyrics({ id: "t2" });
+  assert.equal(page.lrc, "[00:19.00]First line");
+});
+
+test("Vkeys matches simplified results to a traditional track", async () => {
+  signedIn();
+  handler = (url) => {
+    if (url.hostname === "emby.test") return traditionalTrackItem();
+    if (url.hostname === "lrclib.net") {
+      return url.pathname === "/api/get" ? { status: 404, body: {} } : { status: 200, body: [] };
+    }
+    assert.equal(url.hostname, "api.vkeys.cn");
+    if (url.pathname === "/v2/music/tencent/search/song") {
+      assert.equal(url.searchParams.get("word"), "水星記 郭頂");
+      return {
+        status: 200,
+        body: {
+          code: 200,
+          data: [
+            { id: 1, song: "水星记", singer: "郭顶", interval: "5分25秒" },
+            { id: 2, song: "水星记 (DJ 阿乐版)", singer: "郭顶", interval: "5分41秒" },
+          ],
+        },
+      };
+    }
+    assert.equal(url.pathname, "/v2/music/tencent/lyric");
+    assert.equal(url.searchParams.get("id"), "1");
+    return { status: 200, body: { code: 200, data: { lrc: "[00:05.00]La la" } } };
+  };
+
+  const page = await plugin.lyrics({ id: "t2" });
+  assert.equal(page.lrc, "[00:05.00]La la");
+});
+
+test("lrcmux is the last resort when LRCLIB and Vkeys have none", async () => {
   signedIn();
   handler = (url) => {
     if (url.hostname === "emby.test") return trackItem();
     if (url.hostname === "lrclib.net") {
       return url.pathname === "/api/get" ? { status: 404, body: {} } : { status: 200, body: [] };
     }
+    if (url.hostname === "api.vkeys.cn") return { status: 200, body: { code: 200, data: [] } };
     assert.equal(url.hostname, "api.lrcmux.dev");
     assert.equal(url.pathname, "/get");
     assert.equal(url.searchParams.get("artist"), "Test Artist");
@@ -679,5 +779,5 @@ test("a track with no lyrics is asked for once", async () => {
 
   assert.deepEqual(await plugin.lyrics({ id: "t1" }), {});
   assert.deepEqual(await plugin.lyrics({ id: "t1" }), {});
-  assert.equal(asked, 3);
+  assert.equal(asked, 4);
 });

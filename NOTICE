@@ -1,0 +1,6 @@
+MyGo Music Emby plugin
+Copyright © 2026 MoeWah
+
+The traditional to simplified character pairs in index.js are derived from
+Open Chinese Convert (OpenCC), https://github.com/BYVoid/OpenCC, licensed
+under the Apache License, Version 2.0.
