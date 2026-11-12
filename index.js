@@ -483,21 +483,25 @@ function slotLabel(slot, lang) {
   return zh ? "晚间推荐" : "Evening mix";
 }
 
+// The listener's language, for the mix's labels.
+function lang() {
+  return typeof host.language === "function" ? host.language() : "en";
+}
+
 // dailySubtitle heads the daily page with the day and its slot, in the
 // listener's language.
 function dailySubtitle(date = nowDate()) {
-  const lang = typeof host.language === "function" ? host.language() : "en";
   const slot = slotOf(date);
-  if (lang === "zh-CN") {
+  if (lang() === "zh-CN") {
     const week = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"];
-    return `${date.getMonth() + 1}月${date.getDate()}日 ${week[date.getDay()]} · ${slotLabel(slot, lang)}`;
+    return `${date.getMonth() + 1}月${date.getDate()}日 ${week[date.getDay()]} · ${slotLabel(slot, lang())}`;
   }
   const week = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
   const months = [
     "January", "February", "March", "April", "May", "June",
     "July", "August", "September", "October", "November", "December",
   ];
-  return `${week[date.getDay()]}, ${months[date.getMonth()]} ${date.getDate()} · ${slotLabel(slot, lang)}`;
+  return `${week[date.getDay()]}, ${months[date.getMonth()]} ${date.getDate()} · ${slotLabel(slot, lang())}`;
 }
 
 // dailyTracks is the mix for this part of the day: songs the listener plays,
@@ -742,7 +746,17 @@ export async function home() {
     soft(items({ IncludeItemTypes: "MusicArtist", Filters: "IsFavorite", SortBy: "SortName", Limit: 10 }), { Items: [] }),
   ]);
   const sections = [];
-  if (daily.length) sections.push({ title: t("Daily Mix"), tracks: daily, morePage: "daily" });
+  // No morePage: the card opens the section's own page, headed with the day
+  // over the first cover's colors and the date. The subtitle follows the song
+  // count there, keeping the time of day.
+  if (daily.length) {
+    sections.push({
+      title: t("Daily Mix"),
+      pageTitle: t("Daily Mix"),
+      subtitle: slotLabel(slotOf(), lang()),
+      tracks: daily,
+    });
+  }
   const likedTracks = itemsOf(likedTracksData).map(toTrack);
   if (likedTracks.length) sections.push({ title: t("Favorite Songs"), tracks: likedTracks, morePage: "favorites" });
   const albums = itemsOf(newest).map(toAlbum);

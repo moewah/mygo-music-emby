@@ -375,6 +375,7 @@ test("favorites check every requested id, in chunks", async () => {
 
 test("home leads with the daily mix, then favorite songs, recent and favorite albums", async () => {
   signedIn();
+  freeze(8);
   handler = (url) => {
     assert.equal(url.pathname, "/emby/Users/u1/Items");
     const params = url.searchParams;
@@ -409,7 +410,11 @@ test("home leads with the daily mix, then favorite songs, recent and favorite al
     home.sections.map((section) => section.title),
     ["Daily Mix", "Favorite Songs", "Recently Added", "Favorite Albums", "Followed Artists"],
   );
-  assert.equal(home.sections[0].morePage, "daily");
+  assert.equal(home.sections[0].morePage, undefined);
+  // The card opens the section's own page, headed with the day: the title it
+  // shows there, and the slot after the song count.
+  assert.equal(home.sections[0].pageTitle, "Daily Mix");
+  assert.equal(home.sections[0].subtitle, "Morning mix");
   assert.equal(home.sections[1].morePage, "favorites");
   assert.equal(home.sections[2].morePage, "recent");
   assert.equal(home.sections[3].morePage, "favoriteAlbums");
