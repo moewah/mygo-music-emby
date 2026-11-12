@@ -1161,8 +1161,8 @@ export async function stream({ id, quality }) {
 // ---------------------------------------------------------------------------
 // Lyrics
 
-// LRCLIB has synced lyrics for most tracks, Vkeys (QQ Music) covers many
-// Chinese songs it misses, and lrcmux is the last resort.
+// LRCLIB has synced lyrics for most tracks, Vkeys covers many Chinese songs
+// it misses, and lrcmux is the last resort.
 const LYRICS_SOURCES = [
   { name: "lrclib", find: lrclibLyrics },
   { name: "vkeys", find: vkeysLyrics },
