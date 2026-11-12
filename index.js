@@ -738,12 +738,14 @@ export function setSetting({ key }) {
 
 export async function home() {
   requireSession();
+  // Each row of Home shows the same number of items before its See All.
+  const preview = 12;
   const [daily, likedTracksData, newest, favoriteAlbumData, followedArtistData] = await Promise.all([
     soft(dailyTracks(), []),
-    soft(items({ IncludeItemTypes: "Audio", Filters: "IsFavorite", SortBy: "DatePlayed", SortOrder: "Descending", Limit: 20 }), { Items: [] }),
-    soft(items({ IncludeItemTypes: "MusicAlbum", SortBy: "DateCreated", SortOrder: "Descending", Limit: 10 }), { Items: [] }),
-    soft(items({ IncludeItemTypes: "MusicAlbum", Filters: "IsFavorite", SortBy: "DateCreated", SortOrder: "Descending", Limit: 10 }), { Items: [] }),
-    soft(items({ IncludeItemTypes: "MusicArtist", Filters: "IsFavorite", SortBy: "SortName", Limit: 10 }), { Items: [] }),
+    soft(items({ IncludeItemTypes: "Audio", Filters: "IsFavorite", SortBy: "DatePlayed", SortOrder: "Descending", Limit: preview }), { Items: [] }),
+    soft(items({ IncludeItemTypes: "MusicAlbum", SortBy: "DateCreated", SortOrder: "Descending", Limit: preview }), { Items: [] }),
+    soft(items({ IncludeItemTypes: "MusicAlbum", Filters: "IsFavorite", SortBy: "DateCreated", SortOrder: "Descending", Limit: preview }), { Items: [] }),
+    soft(items({ IncludeItemTypes: "MusicArtist", Filters: "IsFavorite", SortBy: "SortName", Limit: preview }), { Items: [] }),
   ]);
   const sections = [];
   // No morePage: the card opens the section's own page, headed with the day
@@ -757,10 +759,10 @@ export async function home() {
       tracks: daily,
     });
   }
-  const likedTracks = itemsOf(likedTracksData).map(toTrack);
-  if (likedTracks.length) sections.push({ title: t("Favorite Songs"), tracks: likedTracks, morePage: "favorites" });
   const albums = itemsOf(newest).map(toAlbum);
   if (albums.length) sections.push({ title: t("Recently Added"), albums, morePage: "recent" });
+  const likedTracks = itemsOf(likedTracksData).map(toTrack);
+  if (likedTracks.length) sections.push({ title: t("Favorite Songs"), tracks: likedTracks, morePage: "favorites" });
   const favoriteAlbums = itemsOf(favoriteAlbumData).map(toAlbum);
   if (favoriteAlbums.length) sections.push({ title: t("Favorite Albums"), albums: favoriteAlbums, morePage: "favoriteAlbums" });
   const artists = itemsOf(followedArtistData).map(toArtist);
