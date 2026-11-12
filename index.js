@@ -85,6 +85,7 @@ function requireSession() {
 
 function clearSession() {
   for (const key of ["token", "userId", "userName", "userImageTag", "serverId", "dailyCache"]) store.remove(key);
+  clearLyrics();
 }
 
 function deviceId() {
@@ -1155,4 +1156,223 @@ export async function stream({ id, quality }) {
     bitRate,
     headers: { "X-Emby-Token": session.token },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Lyrics
+
+// LRCLIB has synced lyrics for most tracks; lrcmux searches several providers
+// when it doesn't.
+const LYRICS_SOURCES = [
+  { name: "lrclib", find: lrclibLyrics },
+  { name: "lrcmux", find: lrcmuxLyrics },
+];
+const LYRICS_AGENT = "MyGo Music Emby plugin/0.1.0 (https://github.com/moewah/mygo-music-emby)";
+const LYRICS_TIMEOUT = 5000;
+const LYRICS_MAX = 300;
+const LYRICS_TTL = 30 * 24 * 60 * 60 * 1000;
+const LYRICS_MISS_TTL = 3 * 24 * 60 * 60 * 1000;
+
+// within rejects a request that takes longer than ms.
+async function within(promise, ms) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("timed out")), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function lyricsResponse(url) {
+  return within(
+    fetch(url, { headers: { Accept: "application/json, text/plain", "User-Agent": LYRICS_AGENT } }),
+    LYRICS_TIMEOUT,
+  );
+}
+
+async function lyricsJson(url) {
+  const response = await lyricsResponse(url);
+  if (!response.ok) return null;
+  try {
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+async function lyricsText(url) {
+  const response = await lyricsResponse(url);
+  if (!response.ok) return "";
+  try {
+    return await response.text();
+  } catch {
+    return "";
+  }
+}
+
+function timedLrc(text) {
+  const lrc = typeof text === "string" ? text.trim() : "";
+  return /\[\d{1,3}:\d{2}/.test(lrc) ? lrc : "";
+}
+
+function normalized(text) {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/\[[^\]]*\]/g, " ")
+    .replace(/[^\w\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]+/g, "");
+}
+
+// The closest match wins: title, artist and length.
+function lyricsScore(candidate, info) {
+  let score = 0;
+  const title = normalized(pick(candidate, "trackName", ""));
+  const wanted = normalized(info.title);
+  if (title && title === wanted) score += 4;
+  else if (title && wanted && (title.includes(wanted) || wanted.includes(title))) score += 2;
+  const artist = normalized(pick(candidate, "artistName", ""));
+  const wantedArtists = [info.artist, info.firstArtist].map(normalized).filter(Boolean);
+  if (artist && wantedArtists.some((name) => artist.includes(name) || name.includes(artist))) score += 3;
+  if (info.duration) {
+    const gap = Math.abs((Number(pick(candidate, "duration", 0)) || 0) - info.duration);
+    if (gap <= 2) score += 3;
+    else if (gap <= 5) score += 2;
+    else if (gap <= 10) score += 1;
+  }
+  return score;
+}
+
+async function lrclibLyrics(info) {
+  const exact = await lyricsJson(`https://lrclib.net/api/get${queryString({
+    track_name: info.title,
+    artist_name: info.artist,
+    album_name: info.album,
+    duration: info.duration || undefined,
+  })}`);
+  if (exact && pick(exact, "instrumental", false)) return "";
+  const exactLrc = timedLrc(pick(exact || {}, "syncedLyrics", ""));
+  if (exactLrc) return exactLrc;
+  const found = await lyricsJson(`https://lrclib.net/api/search${queryString({
+    track_name: info.title,
+    artist_name: info.firstArtist || info.artist,
+  })}`);
+  if (!Array.isArray(found) || !found.length) return "";
+  let best = "";
+  let bestScore = 0;
+  for (const candidate of found) {
+    const lrc = timedLrc(pick(candidate, "syncedLyrics", ""));
+    if (!lrc) continue;
+    const score = lyricsScore(candidate, info);
+    if (score > bestScore) {
+      best = lrc;
+      bestScore = score;
+    }
+  }
+  return bestScore >= 5 ? best : "";
+}
+
+async function lrcmuxLyrics(info) {
+  const text = await lyricsText(`https://api.lrcmux.dev/get${queryString({
+    artist: info.firstArtist || info.artist,
+    title: info.title,
+    album: info.album,
+    duration: info.duration || undefined,
+    level: "line",
+    strict: "true",
+    format: "lrc",
+  })}`);
+  return timedLrc(text);
+}
+
+async function findLyrics(info) {
+  for (const source of LYRICS_SOURCES) {
+    try {
+      const lrc = await source.find(info);
+      if (lrc) return { lrc, source: source.name };
+    } catch {
+      // Try the next source.
+    }
+  }
+  return null;
+}
+
+function lyricsKey(id) {
+  return `lyrics:${id}`;
+}
+
+function lyricsCacheKeys() {
+  try {
+    const keys = JSON.parse(store.get("lyricsCacheKeys", "[]"));
+    return Array.isArray(keys) ? keys : [];
+  } catch {
+    return [];
+  }
+}
+
+function cachedLyrics(id) {
+  let entry = null;
+  try {
+    entry = JSON.parse(store.get(lyricsKey(id), ""));
+  } catch {
+    return null;
+  }
+  if (!entry || typeof entry !== "object" || !entry.at) return null;
+  const ttl = entry.lrc ? LYRICS_TTL : LYRICS_MISS_TTL;
+  if (Date.now() - entry.at > ttl) {
+    forgetLyrics(id);
+    return null;
+  }
+  return entry;
+}
+
+function rememberLyrics(id, lrc, source) {
+  store.set(lyricsKey(id), JSON.stringify({ lrc, source, at: Date.now() }));
+  const keys = lyricsCacheKeys().filter((key) => key !== id);
+  keys.unshift(id);
+  for (const dropped of keys.splice(LYRICS_MAX)) store.remove(lyricsKey(dropped));
+  store.set("lyricsCacheKeys", JSON.stringify(keys));
+}
+
+function forgetLyrics(id) {
+  store.remove(lyricsKey(id));
+  store.set("lyricsCacheKeys", JSON.stringify(lyricsCacheKeys().filter((key) => key !== id)));
+}
+
+function clearLyrics() {
+  for (const id of lyricsCacheKeys()) store.remove(lyricsKey(id));
+  store.remove("lyricsCacheKeys");
+}
+
+function lyricsInfo(item) {
+  const artists = artistsOf(item);
+  return {
+    title: pick(item, "Name", ""),
+    artist: artists.map((artist) => artist.name).join(", "),
+    firstArtist: artists.length ? artists[0].name : "",
+    album: pick(item, "Album", ""),
+    duration: Math.round(durationOf(item) / 1000),
+  };
+}
+
+// lyrics answers a track's words as LRC, from the first source that has them.
+export async function lyrics({ id }) {
+  requireSession();
+  const cached = cachedLyrics(id);
+  if (cached) return cached.lrc ? { lrc: cached.lrc } : {};
+  let item;
+  try {
+    item = await itemById(id);
+  } catch {
+    return {};
+  }
+  const info = lyricsInfo(item);
+  if (!info.title) return {};
+  const found = await findLyrics(info);
+  rememberLyrics(id, found ? found.lrc : "", found ? found.source : "");
+  return found ? { lrc: found.lrc } : {};
 }
