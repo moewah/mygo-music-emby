@@ -1,0 +1,582 @@
+// SPDX-FileCopyrightText: 2026 MoeWah
+// SPDX-License-Identifier: AGPL-3.0-only
+
+import { test, beforeEach } from "node:test";
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import * as plugin from "./index.js";
+
+const settings = { server: "http://emby.test:8096/", username: "alice", password: "secret" };
+const storage = new Map();
+const calls = [];
+
+globalThis.host = {
+  platform: "darwin",
+  arch: "arm64",
+  t: (text) => text,
+  language: () => "en",
+  setting: (key) => settings[key],
+  storage: {
+    get: (key) => storage.get(key),
+    set: (key, value) => storage.set(key, value),
+    remove: (key) => storage.delete(key),
+  },
+  crypto: { md5: (text) => createHash("md5").update(text).digest("hex") },
+};
+
+let handler = () => ({ status: 200, body: {} });
+
+globalThis.fetch = async (input, options = {}) => {
+  const url = new URL(input);
+  calls.push({ url, options });
+  return reply(await handler(url, options));
+};
+
+function reply({ status = 200, body = null } = {}) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    statusText: "",
+    json: async () => body,
+    text: async () => (body === null ? "" : JSON.stringify(body)),
+  };
+}
+
+function signedIn() {
+  storage.set("token", "tok");
+  storage.set("userId", "u1");
+  storage.set("userName", "Alice");
+}
+
+function albumImage(id, tag) {
+  return `http://emby.test:8096/emby/Items/${id}/Images/Primary?maxWidth=%7Bsize%7D&maxHeight=%7Bsize%7D${tag ? `&tag=${tag}` : ""}`;
+}
+
+function userImage(id, tag) {
+  return `http://emby.test:8096/emby/Users/${id}/Images/Primary?maxWidth=%7Bsize%7D&maxHeight=%7Bsize%7D${tag ? `&tag=${tag}` : ""}`;
+}
+
+beforeEach(() => {
+  calls.length = 0;
+  storage.clear();
+  settings.server = "http://emby.test:8096/";
+  settings.username = "alice";
+  settings.password = "secret";
+  delete settings.apiKey;
+  handler = () => ({ status: 200, body: {} });
+});
+
+test("signing in with a password keeps the token and answers the account", async () => {
+  handler = (url, options) => {
+    if (url.pathname !== "/emby/Users/AuthenticateByName") return { status: 404, body: {} };
+    assert.equal(options.method, "POST");
+    assert.deepEqual(JSON.parse(options.body), { Username: "alice", Pw: "secret" });
+    assert.match(options.headers["X-Emby-Authorization"], /^MediaBrowser Client="MyGo Music"/);
+    return {
+      status: 200,
+      body: {
+        AccessToken: "tok",
+        ServerId: "srv",
+        User: { Id: "u1", Name: "Alice", ImageTags: { Primary: "utag" } },
+      },
+    };
+  };
+
+  const account = await plugin.signIn();
+  assert.equal(account.id, "u1");
+  assert.equal(account.name, "Alice");
+  assert.equal(account.page, "profile");
+  assert.equal(account.imageUrl, userImage("u1", "utag"));
+  assert.equal(storage.get("token"), "tok");
+  assert.equal(storage.get("userId"), "u1");
+  assert.equal(plugin.account().id, "u1");
+});
+
+test("signing in with an API key finds the user behind it", async () => {
+  settings.apiKey = "key-1";
+  delete settings.username;
+  delete settings.password;
+  handler = (url, options) => {
+    assert.equal(url.pathname, "/emby/Users/Me");
+    assert.equal(options.headers["X-Emby-Token"], "key-1");
+    return { status: 200, body: { Id: "u2", Name: "Bob" } };
+  };
+
+  const account = await plugin.signIn();
+  assert.equal(account.id, "u2");
+  assert.equal(account.name, "Bob");
+  assert.equal(storage.get("token"), "key-1");
+});
+
+test("changing the server forgets the session", () => {
+  signedIn();
+  plugin.setSetting({ key: "server", value: "http://elsewhere" });
+  assert.equal(plugin.account(), null);
+  assert.equal(storage.has("token"), false);
+});
+
+test("search maps items and carries the page offset", async () => {
+  signedIn();
+  handler = (url) => {
+    assert.equal(url.pathname, "/emby/Users/u1/Items");
+    assert.equal(url.searchParams.get("IncludeItemTypes"), "Audio");
+    assert.equal(url.searchParams.get("SearchTerm"), "hello");
+    assert.equal(url.searchParams.get("StartIndex"), "50");
+    assert.equal(url.searchParams.get("Limit"), "50");
+    return {
+      status: 200,
+      body: {
+        TotalRecordCount: 101,
+        Items: [
+          {
+            Id: "t1",
+            Name: "Song",
+            RunTimeTicks: 1800000000,
+            AlbumId: "al1",
+            Album: "Album",
+            AlbumPrimaryImageTag: "atag",
+            ArtistItems: [{ Id: "ar1", Name: "Artist" }],
+            AlbumArtists: [{ Id: "ar1", Name: "Artist" }],
+            PremiereDate: "2020-05-01T00:00:00.0000000Z",
+            Container: "flac",
+          },
+        ],
+      },
+    };
+  };
+
+  const result = await plugin.search({ query: "hello", kind: "tracks", offset: 50 });
+  assert.equal(result.more, true);
+  assert.equal(result.tracks.length, 1);
+  const track = result.tracks[0];
+  assert.equal(track.id, "t1");
+  assert.equal(track.name, "Song");
+  assert.equal(track.duration, 180000);
+  assert.deepEqual(track.artists, [{ id: "ar1", name: "Artist" }]);
+  assert.equal(track.album.id, "al1");
+  assert.equal(track.album.name, "Album");
+  assert.equal(track.album.imageUrl, albumImage("al1", "atag"));
+  assert.equal(track.album.released, "2020-05-01");
+  assert.equal(track.url, "http://emby.test:8096/web/index.html#!/item?id=t1");
+});
+
+test("albums, artists and playlists map to the app's shapes", async () => {
+  signedIn();
+  handler = (url) => {
+    if (url.pathname === "/emby/Users/u1/Items/al1") {
+      return {
+        status: 200,
+        body: {
+          Id: "al1",
+          Name: "Album",
+          ImageTags: { Primary: "atag" },
+          AlbumArtists: [{ Id: "ar1", Name: "Artist" }],
+          UserData: { IsFavorite: true },
+          ProductionYear: 2020,
+        },
+      };
+    }
+    if (url.pathname === "/emby/Users/u1/Items") {
+      return {
+        status: 200,
+        body: {
+          Items: [
+            { Id: "t1", Name: "Song", AlbumId: "al1", Album: "Album", RunTimeTicks: 10000000 },
+          ],
+          TotalRecordCount: 1,
+        },
+      };
+    }
+    return { status: 404, body: {} };
+  };
+
+  const page = await plugin.album({ id: "al1" });
+  assert.equal(page.album.id, "al1");
+  assert.equal(page.album.saved, true);
+  assert.equal(page.album.released, "2020");
+  assert.equal(page.album.imageUrl, albumImage("al1", "atag"));
+  assert.equal(page.tracks.length, 1);
+});
+
+test("covers come from the item Emby says they are inherited from", async () => {
+  // Emby 4.8 leaves ImageTags empty for freshly scanned albums and names the
+  // item that holds the cover with PrimaryImageItemId instead.
+  signedIn();
+  const inherited = {
+    Id: "t1",
+    Name: "Song",
+    AlbumId: "al1",
+    Album: "Album",
+    PrimaryImageTag: "ptag",
+    PrimaryImageItemId: "song1",
+    RunTimeTicks: 10000000,
+  };
+  handler = (url) => {
+    if (url.pathname === "/emby/Users/u1/Items/al1") {
+      return {
+        status: 200,
+        body: { Id: "al1", Name: "Album", PrimaryImageTag: "ptag", PrimaryImageItemId: "song1" },
+      };
+    }
+    assert.equal(url.pathname, "/emby/Users/u1/Items");
+    return { status: 200, body: { Items: [inherited], TotalRecordCount: 1 } };
+  };
+
+  const page = await plugin.album({ id: "al1" });
+  assert.equal(page.album.imageUrl, albumImage("song1", "ptag"));
+  assert.equal(page.tracks[0].album.imageUrl, albumImage("song1", "ptag"));
+});
+
+test("streams direct files when their format is known, and transcodes otherwise", async () => {
+  signedIn();
+  handler = (url) => {
+    assert.equal(url.pathname, "/emby/Users/u1/Items/t1");
+    assert.equal(url.searchParams.get("Fields"), "MediaSources,MediaStreams");
+    return {
+      status: 200,
+      body: {
+        Id: "t1",
+        Container: "flac",
+        MediaSources: [
+          {
+            Bitrate: 900000,
+            MediaStreams: [{ Type: "Audio", Codec: "flac" }],
+          },
+        ],
+      },
+    };
+  };
+
+  const lossless = await plugin.stream({ id: "t1", quality: "lossless" });
+  assert.equal(lossless.type, "flac");
+  assert.equal(lossless.quality, "lossless");
+  assert.equal(lossless.bitRate, 900000);
+  assert.equal(new URL(lossless.url).pathname, "/emby/Audio/t1/stream");
+  assert.equal(new URL(lossless.url).searchParams.get("static"), "true");
+  assert.equal(lossless.headers["X-Emby-Token"], "tok");
+
+  const high = await plugin.stream({ id: "t1", quality: "high" });
+  assert.equal(high.type, "flac");
+  assert.equal(high.quality, "lossless");
+
+  const standard = await plugin.stream({ id: "t1", quality: "standard" });
+  assert.equal(standard.type, "mp3");
+  assert.equal(standard.quality, "standard");
+  assert.equal(new URL(standard.url).pathname, "/emby/Audio/t1/universal");
+  assert.equal(new URL(standard.url).searchParams.get("MaxStreamingBitrate"), "128000");
+
+  handler = (url) => {
+    assert.equal(url.pathname, "/emby/Users/u1/Items/t2");
+    return {
+      status: 200,
+      body: { Id: "t2", Container: "wma", MediaSources: [{ MediaStreams: [{ Type: "Audio", Codec: "wma" }] }] },
+    };
+  };
+  const fallback = await plugin.stream({ id: "t2", quality: "lossless" });
+  assert.equal(fallback.type, "mp3");
+  assert.equal(fallback.quality, "high");
+  assert.equal(new URL(fallback.url).pathname, "/emby/Audio/t2/universal");
+});
+
+test("playlist writes use the entry ids Emby returned", async () => {
+  signedIn();
+  handler = (url, options) => {
+    if (url.pathname === "/emby/Playlists/p1/Items" && options.method === "GET") {
+      return {
+        status: 200,
+        body: {
+          Items: [
+            { Id: "a", PlaylistItemId: "e1" },
+            { Id: "b", PlaylistItemId: "e2" },
+            { Id: "a", PlaylistItemId: "e3" },
+          ],
+        },
+      };
+    }
+    return { status: 200, body: {} };
+  };
+
+  await plugin.removeFromPlaylist({ id: "p1", trackIds: ["a"] });
+  const remove = calls.find((call) => call.options.method === "DELETE");
+  assert.equal(remove.url.pathname, "/emby/Playlists/p1/Items");
+  assert.equal(remove.url.searchParams.get("EntryIds"), "e1,e3");
+
+  calls.length = 0;
+  await plugin.movePlaylistTrack({ id: "p1", from: 1, to: 0 });
+  const move = calls.find((call) => call.options.method === "POST");
+  assert.equal(move.url.pathname, "/emby/Playlists/p1/Items/e2/Move/0");
+});
+
+test("favorites check every requested id, in chunks", async () => {
+  signedIn();
+  handler = (url) => {
+    assert.equal(url.pathname, "/emby/Users/u1/Items");
+    const ids = url.searchParams.get("Ids").split(",");
+    return {
+      status: 200,
+      body: {
+        Items: ids.map((id) => ({ Id: id, UserData: { IsFavorite: id === "yes" } })),
+      },
+    };
+  };
+
+  const ids = [...Array.from({ length: 60 }, (_, index) => `id${index}`), "yes"];
+  const liked = await plugin.isLiked({ ids });
+  assert.equal(Object.keys(liked).length, ids.length);
+  assert.equal(liked.yes, true);
+  assert.equal(liked.id0, false);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].url.searchParams.get("Ids").split(",").length, 50);
+  assert.equal(calls[1].url.searchParams.get("Ids").split(",").length, 11);
+});
+
+test("home leads with the daily mix, then favorite songs, recent and favorite albums", async () => {
+  signedIn();
+  handler = (url) => {
+    assert.equal(url.pathname, "/emby/Users/u1/Items");
+    const params = url.searchParams;
+    if (params.get("IncludeItemTypes") === "Audio") {
+      if (params.get("Filters") === "IsFavorite") {
+        assert.ok(["20", "40"].includes(params.get("Limit")));
+        return { status: 200, body: { Items: [{ Id: "fav1", Name: "Loved", RunTimeTicks: 10000000 }] } };
+      }
+      return { status: 200, body: { Items: [{ Id: "t1", Name: "Song", RunTimeTicks: 10000000 }] } };
+    }
+    if (params.get("IncludeItemTypes") === "MusicArtist") {
+      assert.equal(params.get("Filters"), "IsFavorite");
+      assert.equal(params.get("Limit"), "10");
+      return { status: 200, body: { Items: [{ Id: "ar1", Name: "Artist" }] } };
+    }
+    assert.equal(params.get("IncludeItemTypes"), "MusicAlbum");
+    if (params.get("Filters") === "IsFavorite") {
+      if (params.get("Limit") !== "10") return { status: 200, body: { Items: [] } };
+      assert.equal(params.get("SortBy"), "DateCreated");
+      return { status: 200, body: { Items: [{ Id: "al2", Name: "Favorite" }] } };
+    }
+    if (params.get("SortBy") === "DateCreated") {
+      assert.equal(params.get("SortOrder"), "Descending");
+      assert.equal(params.get("Limit"), "10");
+      return { status: 200, body: { Items: [{ Id: "al1", Name: "New" }] } };
+    }
+    return { status: 200, body: { Items: [] } };
+  };
+
+  const home = await plugin.home();
+  assert.deepEqual(
+    home.sections.map((section) => section.title),
+    ["Daily Mix", "Favorite Songs", "Recently Added", "Favorite Albums", "Followed Artists"],
+  );
+  assert.equal(home.sections[0].morePage, "daily");
+  assert.equal(home.sections[1].morePage, "favorites");
+  assert.equal(home.sections[2].morePage, "recent");
+  assert.equal(home.sections[3].morePage, "favoriteAlbums");
+  assert.equal(home.sections[4].morePage, "artists");
+  assert.equal(home.sections[0].tracks[0].id, "t1");
+  assert.equal(home.sections[1].tracks[0].id, "fav1");
+  assert.equal(home.sections[2].albums[0].name, "New");
+  assert.equal(home.sections[3].albums[0].name, "Favorite");
+  assert.equal(home.sections[4].artists[0].name, "Artist");
+});
+
+test("the daily mix is made once and shared by home and its page", async () => {
+  signedIn();
+  let unplayed = 0;
+  handler = (url) => {
+    const params = url.searchParams;
+    assert.equal(url.pathname, "/emby/Users/u1/Items");
+    if (params.get("IncludeItemTypes") === "Audio") {
+      if (params.get("Filters") === "IsUnplayed") {
+        unplayed++;
+        return { status: 200, body: { Items: [{ Id: "fresh", Name: "Fresh", RunTimeTicks: 10000000 }] } };
+      }
+      return { status: 200, body: { Items: [{ Id: "top", Name: "Top", RunTimeTicks: 10000000 }] } };
+    }
+    return { status: 200, body: { Items: [] } };
+  };
+
+  const first = await plugin.browse({ page: "daily" });
+  assert.equal(unplayed, 1);
+  const second = await plugin.browse({ page: "daily" });
+  assert.equal(unplayed, 1);
+  assert.deepEqual(
+    second.sections[0].tracks.map((track) => track.id),
+    first.sections[0].tracks.map((track) => track.id),
+  );
+  assert.ok(first.sections[0].tracks.some((track) => track.id === "fresh"));
+  // The page is headed with the day, plainly, as Frequently Played is.
+  assert.match(first.subtitle, /^[A-Z][a-z]+, [A-Z][a-z]+ \d+$/);
+  assert.equal(first.imageUrl, undefined);
+  assert.ok(first.description.includes("new every day"));
+});
+
+test("the daily mix fills forty songs and repeats none", async () => {
+  signedIn();
+  handler = (url) => {
+    assert.equal(url.pathname, "/emby/Users/u1/Items");
+    assert.equal(url.searchParams.get("IncludeItemTypes"), "Audio");
+    return {
+      status: 200,
+      body: {
+        Items: Array.from({ length: 50 }, (_, index) => ({ Id: `t${index}`, Name: `T${index}`, RunTimeTicks: 10000000 })),
+        TotalRecordCount: 50,
+      },
+    };
+  };
+
+  const page = await plugin.browse({ page: "daily" });
+  const ids = page.sections[0].tracks.map((track) => track.id);
+  assert.equal(ids.length, 40);
+  assert.equal(new Set(ids).size, 40);
+});
+
+test("the favorites page lists every liked song", async () => {
+  signedIn();
+  handler = (url) => {
+    assert.equal(url.pathname, "/emby/Users/u1/Items");
+    assert.equal(url.searchParams.get("IncludeItemTypes"), "Audio");
+    assert.equal(url.searchParams.get("Filters"), "IsFavorite");
+    assert.equal(url.searchParams.get("SortBy"), "DatePlayed");
+    assert.equal(url.searchParams.get("SortOrder"), "Descending");
+    return {
+      status: 200,
+      body: {
+        Items: [
+          { Id: "a", Name: "A", RunTimeTicks: 10000000 },
+          { Id: "b", Name: "B", RunTimeTicks: 10000000 },
+        ],
+        TotalRecordCount: 2,
+      },
+    };
+  };
+
+  const page = await plugin.browse({ page: "favorites" });
+  assert.equal(page.title, "Favorite Songs");
+  assert.deepEqual(page.sections[0].tracks.map((track) => track.id), ["a", "b"]);
+  assert.equal(page.subtitle, "2 songs");
+});
+
+test("the frequent page counts its songs and says how they rank", async () => {
+  signedIn();
+  handler = (url) => {
+    assert.equal(url.pathname, "/emby/Users/u1/Items");
+    assert.equal(url.searchParams.get("SortBy"), "PlayCount");
+    return { status: 200, body: { Items: [{ Id: "t1", Name: "Song", RunTimeTicks: 10000000 }] } };
+  };
+
+  const page = await plugin.browse({ page: "frequent" });
+  assert.equal(page.subtitle, "1 songs");
+  assert.equal(page.description, "Ranked by play count");
+});
+
+test("a song played is marked played on the server", async () => {
+  signedIn();
+  handler = (url, options) => {
+    assert.equal(url.pathname, "/emby/Users/u1/PlayedItems/t1");
+    assert.equal(options.method, "POST");
+    return { status: 200, body: {} };
+  };
+
+  await plugin.played({ id: "t1" });
+  assert.equal(calls.length, 1);
+
+  storage.clear();
+  calls.length = 0;
+  await plugin.played({ id: "t1" });
+  assert.equal(calls.length, 0);
+});
+
+test("the favorite albums page lists every saved album", async () => {
+  signedIn();
+  handler = (url) => {
+    assert.equal(url.pathname, "/emby/Users/u1/Items");
+    assert.equal(url.searchParams.get("IncludeItemTypes"), "MusicAlbum");
+    assert.equal(url.searchParams.get("Filters"), "IsFavorite");
+    assert.equal(url.searchParams.get("SortBy"), "DateCreated");
+    assert.equal(url.searchParams.get("SortOrder"), "Descending");
+    return {
+      status: 200,
+      body: {
+        Items: [
+          { Id: "al1", Name: "One" },
+          { Id: "al2", Name: "Two" },
+        ],
+        TotalRecordCount: 2,
+      },
+    };
+  };
+
+  const page = await plugin.browse({ page: "favoriteAlbums" });
+  assert.equal(page.title, "Favorite Albums");
+  assert.deepEqual(page.sections[0].albums.map((album) => album.name), ["One", "Two"]);
+});
+
+test("the recent page is every album, newest first", async () => {
+  signedIn();
+  handler = (url) => {
+    assert.equal(url.pathname, "/emby/Users/u1/Items");
+    assert.equal(url.searchParams.get("IncludeItemTypes"), "MusicAlbum");
+    assert.equal(url.searchParams.get("SortBy"), "DateCreated");
+    assert.equal(url.searchParams.get("SortOrder"), "Descending");
+    const start = Number(url.searchParams.get("StartIndex"));
+    const limit = Number(url.searchParams.get("Limit"));
+    const items = Array.from({ length: Math.max(0, Math.min(limit, 600 - start)) }, (_, index) => ({
+      Id: `a${start + index}`,
+      Name: `A${start + index}`,
+    }));
+    return { status: 200, body: { Items: items, TotalRecordCount: 600 } };
+  };
+
+  const page = await plugin.browse({ page: "recent" });
+  assert.equal(page.title, "Recently Added");
+  assert.equal(page.sections.length, 1);
+  assert.equal(page.sections[0].albums.length, 600);
+  assert.equal(page.sections[0].links, undefined);
+});
+
+test("the artists page lists only followed artists", async () => {
+  signedIn();
+  handler = (url) => {
+    assert.equal(url.pathname, "/emby/Users/u1/Items");
+    assert.equal(url.searchParams.get("IncludeItemTypes"), "MusicArtist");
+    assert.equal(url.searchParams.get("Filters"), "IsFavorite");
+    return {
+      status: 200,
+      body: {
+        Items: [{ Id: "ar1", Name: "Artist", UserData: { IsFavorite: true } }],
+        TotalRecordCount: 1,
+      },
+    };
+  };
+
+  const page = await plugin.browse({ page: "artists" });
+  assert.equal(page.title, "Followed Artists");
+  assert.equal(page.sections[0].artists.length, 1);
+  assert.equal(page.sections[0].artists[0].following, true);
+});
+
+test("all albums fetch every chunk and carry no page links", async () => {
+  signedIn();
+  handler = (url) => {
+    assert.equal(url.pathname, "/emby/Users/u1/Items");
+    assert.equal(url.searchParams.get("IncludeItemTypes"), "MusicAlbum");
+    assert.equal(url.searchParams.get("SortBy"), "DateCreated");
+    assert.equal(url.searchParams.get("SortOrder"), "Descending");
+    const start = Number(url.searchParams.get("StartIndex"));
+    const limit = Number(url.searchParams.get("Limit"));
+    assert.equal(limit, 100);
+    const items = Array.from({ length: Math.max(0, Math.min(limit, 4500 - start)) }, (_, index) => ({
+      Id: `a${start + index}`,
+      Name: `A${start + index}`,
+    }));
+    return { status: 200, body: { Items: items, TotalRecordCount: 4500 } };
+  };
+
+  const page = await plugin.browse({ page: "albums" });
+  assert.equal(page.sections.length, 1);
+  assert.equal(page.sections[0].albums.length, 4500);
+  assert.equal(page.sections[0].albums[0].name, "A0");
+  assert.equal(page.sections[0].albums[4499].name, "A4499");
+  assert.equal(page.sections[0].links, undefined);
+  assert.equal(page.description, undefined);
+  assert.equal(page.subtitle, "4500 albums");
+});

@@ -1,0 +1,50 @@
+{
+  "id": "emby",
+  "name": "Emby",
+  "version": "0.1.0",
+  "minAppVersion": "0.1.24",
+  "main": "index.js",
+  "playback": "stream",
+  "permissions": {
+    "network": ["*"]
+  },
+  "requestHeaders": [
+    {
+      "hosts": ["{setting:server}"],
+      "kinds": ["image", "audio"],
+      "headers": { "X-Emby-Token": "{storage:token}" }
+    }
+  ],
+  "settings": [
+    {
+      "key": "server",
+      "label": "Server URL",
+      "help": "For example http://192.168.1.10:8096; subpaths are supported"
+    },
+    {
+      "key": "username",
+      "label": "Username",
+      "help": "For signing in with your Emby password"
+    },
+    {
+      "key": "password",
+      "label": "Password",
+      "type": "password",
+      "help": "Use HTTPS when the server is outside your network"
+    },
+    {
+      "key": "apiKey",
+      "label": "API key",
+      "type": "password",
+      "help": "Optional. From Emby's Advanced settings; takes precedence over the username and password"
+    }
+  ],
+  "navigation": [
+    { "builtin": "home" },
+    { "title": "Daily Mix", "page": "daily", "icon": "star" },
+    { "title": "Frequently Played", "page": "frequent", "icon": "chart" },
+    { "title": "All Albums", "page": "albums", "icon": "album" },
+    { "title": "Favorite Songs", "builtin": "liked" },
+    { "title": "Favorite Albums", "builtin": "savedAlbums" }
+  ]
+}
