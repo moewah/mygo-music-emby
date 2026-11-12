@@ -373,7 +373,7 @@ test("favorites check every requested id, in chunks", async () => {
   assert.equal(calls[1].url.searchParams.get("Ids").split(",").length, 11);
 });
 
-test("home leads with the daily mix, then favorite songs, recent and favorite albums", async () => {
+test("home leads with the daily mix, then recent, liked, saved and followed", async () => {
   signedIn();
   freeze(8);
   handler = (url) => {
@@ -381,25 +381,25 @@ test("home leads with the daily mix, then favorite songs, recent and favorite al
     const params = url.searchParams;
     if (params.get("IncludeItemTypes") === "Audio") {
       if (params.get("Filters") === "IsFavorite") {
-        assert.ok(["20", "40"].includes(params.get("Limit")));
+        assert.ok(["12", "40"].includes(params.get("Limit")));
         return { status: 200, body: { Items: [{ Id: "fav1", Name: "Loved", RunTimeTicks: 10000000 }] } };
       }
       return { status: 200, body: { Items: [{ Id: "t1", Name: "Song", RunTimeTicks: 10000000 }] } };
     }
     if (params.get("IncludeItemTypes") === "MusicArtist") {
       assert.equal(params.get("Filters"), "IsFavorite");
-      assert.equal(params.get("Limit"), "10");
+      assert.equal(params.get("Limit"), "12");
       return { status: 200, body: { Items: [{ Id: "ar1", Name: "Artist" }] } };
     }
     assert.equal(params.get("IncludeItemTypes"), "MusicAlbum");
     if (params.get("Filters") === "IsFavorite") {
-      if (params.get("Limit") !== "10") return { status: 200, body: { Items: [] } };
+      if (params.get("Limit") !== "12") return { status: 200, body: { Items: [] } };
       assert.equal(params.get("SortBy"), "DateCreated");
       return { status: 200, body: { Items: [{ Id: "al2", Name: "Favorite" }] } };
     }
     if (params.get("SortBy") === "DateCreated") {
       assert.equal(params.get("SortOrder"), "Descending");
-      assert.equal(params.get("Limit"), "10");
+      assert.equal(params.get("Limit"), "12");
       return { status: 200, body: { Items: [{ Id: "al1", Name: "New" }] } };
     }
     return { status: 200, body: { Items: [] } };
@@ -408,20 +408,20 @@ test("home leads with the daily mix, then favorite songs, recent and favorite al
   const home = await plugin.home();
   assert.deepEqual(
     home.sections.map((section) => section.title),
-    ["Daily Mix", "Favorite Songs", "Recently Added", "Favorite Albums", "Followed Artists"],
+    ["Daily Mix", "Recently Added", "Favorite Songs", "Favorite Albums", "Followed Artists"],
   );
   assert.equal(home.sections[0].morePage, undefined);
   // The card opens the section's own page, headed with the day: the title it
   // shows there, and the slot after the song count.
   assert.equal(home.sections[0].pageTitle, "Daily Mix");
   assert.equal(home.sections[0].subtitle, "Morning mix");
-  assert.equal(home.sections[1].morePage, "favorites");
-  assert.equal(home.sections[2].morePage, "recent");
+  assert.equal(home.sections[1].morePage, "recent");
+  assert.equal(home.sections[2].morePage, "favorites");
   assert.equal(home.sections[3].morePage, "favoriteAlbums");
   assert.equal(home.sections[4].morePage, "artists");
   assert.deepEqual(home.sections[0].tracks.map((track) => track.id).sort(), ["fav1", "t1"]);
-  assert.equal(home.sections[1].tracks[0].id, "fav1");
-  assert.equal(home.sections[2].albums[0].name, "New");
+  assert.equal(home.sections[1].albums[0].name, "New");
+  assert.equal(home.sections[2].tracks[0].id, "fav1");
   assert.equal(home.sections[3].albums[0].name, "Favorite");
   assert.equal(home.sections[4].artists[0].name, "Artist");
 });
