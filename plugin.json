@@ -41,7 +41,6 @@
   ],
   "navigation": [
     { "builtin": "home" },
-    { "title": "Daily Mix", "page": "daily", "icon": "star" },
     { "title": "Frequently Played", "page": "frequent", "icon": "chart" },
     { "title": "All Albums", "page": "albums", "icon": "album" },
     { "title": "Favorite Songs", "builtin": "liked" },

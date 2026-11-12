@@ -84,7 +84,7 @@ function requireSession() {
 }
 
 function clearSession() {
-  for (const key of ["token", "userId", "userName", "userImageTag", "serverId", "dailyCache"]) store.remove(key);
+  for (const key of ["token", "userId", "userName", "userImageTag", "serverId", "dailyCache", "slotPlays"]) store.remove(key);
   clearLyrics();
 }
 
@@ -417,12 +417,26 @@ async function favorite(id, on) {
 // ---------------------------------------------------------------------------
 // Daily mix
 
+// The host's clock when it has one, so the mix's time of day can be tested.
+function nowDate() {
+  const time = typeof host.now === "function" ? host.now() : Date.now();
+  return new Date(time);
+}
+
 // A day as the local calendar names it, for the daily mix's key.
-function dayKey() {
-  const now = new Date();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
-  return `${now.getFullYear()}-${month}-${day}`;
+function dayKey(date = nowDate()) {
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+// The day has three slots of its own. Morning runs from five to eleven, the
+// middle of the day until five, and the evening through the night.
+function slotOf(date = nowDate()) {
+  const hour = date.getHours();
+  if (hour >= 5 && hour < 11) return "morning";
+  if (hour >= 11 && hour < 17) return "noon";
+  return "evening";
 }
 
 // A random source that gives the same run for the same seed, so a day's mix
@@ -446,41 +460,69 @@ function shuffled(list, random) {
 }
 
 const DAILY_SIZE = 40;
-// How many songs each pool may add: played, liked, similar and new.
-const DAILY_QUOTAS = [10, 10, 10, 10];
+// How many songs each pool may add: played, liked, similar and new. Mornings
+// lean on what the listener knows; evenings make room for new songs.
+const DAILY_QUOTAS = {
+  morning: [10, 10, 12, 8],
+  noon: [8, 8, 12, 12],
+  evening: [6, 6, 12, 16],
+};
+// One artist or album shouldn't fill the mix on their own.
+const DAILY_ARTIST_LIMIT = 2;
+const DAILY_ALBUM_LIMIT = 2;
+// How many songs the mix opens with, before new ones may lead it.
+const DAILY_FAMILIAR_OPENING = 5;
 // Raise this when the recipe changes, so the day's mix is made again.
-const DAILY_VERSION = 5;
+const DAILY_VERSION = 6;
 
-// dailySubtitle heads the daily page with the day, in the listener's language.
-function dailySubtitle(now = new Date()) {
-  const lang = typeof host.language === "function" ? host.language() : "en";
-  if (lang === "zh-CN") {
+// What the day's slot is called, in the listener's language.
+function slotLabel(slot, lang) {
+  const zh = lang === "zh-CN";
+  if (slot === "morning") return zh ? "早间推荐" : "Morning mix";
+  if (slot === "noon") return zh ? "午间推荐" : "Midday mix";
+  return zh ? "晚间推荐" : "Evening mix";
+}
+
+// The listener's language, for the mix's labels.
+function lang() {
+  return typeof host.language === "function" ? host.language() : "en";
+}
+
+// dailySubtitle heads the daily page with the day and its slot, in the
+// listener's language.
+function dailySubtitle(date = nowDate()) {
+  const slot = slotOf(date);
+  if (lang() === "zh-CN") {
     const week = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"];
-    return `${now.getMonth() + 1}月${now.getDate()}日 ${week[now.getDay()]}`;
+    return `${date.getMonth() + 1}月${date.getDate()}日 ${week[date.getDay()]} · ${slotLabel(slot, lang())}`;
   }
   const week = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
   const months = [
     "January", "February", "March", "April", "May", "June",
     "July", "August", "September", "October", "November", "December",
   ];
-  return `${week[now.getDay()]}, ${months[now.getMonth()]} ${now.getDate()}`;
+  return `${week[date.getDay()]}, ${months[date.getMonth()]} ${date.getDate()} · ${slotLabel(slot, lang())}`;
 }
 
-// dailyTracks is the day's mix: songs the listener plays, songs they like,
-// songs like those, and songs they haven't played yet. It's kept for the day
-// so Home and its page show the same list.
+// dailyTracks is the mix for this part of the day: songs the listener plays,
+// songs they like, songs like those, and songs they haven't played yet. It's
+// kept for the day and slot so Home and its page show the same list.
 async function dailyTracks() {
   const userId = currentUserId();
-  const key = `daily:${DAILY_VERSION}:${userId}:${dayKey()}`;
+  const slot = slotOf();
+  const key = `daily:${DAILY_VERSION}:${userId}:${dayKey()}:${slot}`;
   try {
     const cached = JSON.parse(store.get("dailyCache", ""));
     if (cached && cached.key === key && Array.isArray(cached.tracks)) return cached.tracks;
   } catch {
     // No mix kept yet.
   }
-  const [top, favorites, unplayed, likedAlbums, anyAlbums] = await Promise.all([
+  const [top, favorites, recentNew, unplayed, likedAlbums, anyAlbums] = await Promise.all([
     soft(items({ IncludeItemTypes: "Audio", Filters: "IsPlayed", SortBy: "PlayCount", SortOrder: "Descending", Limit: 40 }), { Items: [] }),
     soft(items({ IncludeItemTypes: "Audio", Filters: "IsFavorite", SortBy: "DatePlayed", SortOrder: "Descending", Limit: 40 }), { Items: [] }),
+    // New songs are the ones released most recently, as long as they haven't
+    // played yet.
+    soft(items({ IncludeItemTypes: "Audio", Filters: "IsUnplayed", SortBy: "PremiereDate", SortOrder: "Descending", Limit: 100 }), { Items: [] }),
     soft(items({ IncludeItemTypes: "Audio", Filters: "IsUnplayed", SortBy: "Random", Limit: 40 }), { Items: [] }),
     soft(items({ IncludeItemTypes: "MusicAlbum", Filters: "IsFavorite", SortBy: "Random", Limit: 3 }), { Items: [] }),
     soft(items({ IncludeItemTypes: "MusicAlbum", SortBy: "Random", Limit: 3 }), { Items: [] }),
@@ -500,31 +542,73 @@ async function dailyTracks() {
         ),
       ),
   );
-  const pools = [itemsOf(top), itemsOf(favorites), mixes.flatMap((mix) => itemsOf(mix)), itemsOf(unplayed)];
+  // The random unplayed songs catch a library whose newest release is old.
+  const fresh = itemsOf(recentNew).concat(itemsOf(unplayed));
+  const pools = [itemsOf(top), itemsOf(favorites), mixes.flatMap((mix) => itemsOf(mix)), fresh];
   const picked = [];
   const seen = new Set();
-  const add = (item) => {
+  const freshIds = new Set();
+  const artistUses = new Map();
+  const albumUses = new Map();
+  const add = (item, strict, isFresh) => {
     const id = String(pick(item, "Id", ""));
     if (!id || seen.has(id)) return false;
+    const artist = artistsOf(item)[0];
+    const artistKey = artist ? (artist.id ? `id:${artist.id}` : `name:${String(artist.name).toLowerCase()}`) : "";
+    const albumKey = albumOf(item).id;
+    // The first pass keeps one artist or album from filling the mix. The
+    // second pass, only reached when there aren't enough songs, lets that go.
+    if (strict) {
+      if (artistKey && (artistUses.get(artistKey) || 0) >= DAILY_ARTIST_LIMIT) return false;
+      if (albumKey && (albumUses.get(albumKey) || 0) >= DAILY_ALBUM_LIMIT) return false;
+    }
     seen.add(id);
+    if (artistKey) artistUses.set(artistKey, (artistUses.get(artistKey) || 0) + 1);
+    if (albumKey) albumUses.set(albumKey, (albumUses.get(albumKey) || 0) + 1);
+    if (isFresh) freshIds.add(id);
     picked.push(item);
     return true;
   };
   pools.forEach((pool, index) => {
     let took = 0;
     for (const item of pool) {
-      if (took >= DAILY_QUOTAS[index] || picked.length >= DAILY_SIZE) break;
-      if (add(item)) took++;
+      if (took >= DAILY_QUOTAS[slot][index] || picked.length >= DAILY_SIZE) break;
+      if (add(item, true, index === 3)) took++;
     }
   });
-  for (const pool of pools) {
+  pools.forEach((pool, index) => {
     for (const item of pool) {
       if (picked.length >= DAILY_SIZE) break;
-      add(item);
+      add(item, false, index === 3);
+    }
+  });
+  const tracks = shuffled(picked, seededRandom(host.crypto.md5(key))).map(toTrack);
+  // Mornings open with songs the listener knows; by evening a new song should
+  // have found its way into the opening.
+  if (slot === "morning") {
+    for (let index = 0; index < Math.min(DAILY_FAMILIAR_OPENING, tracks.length); index++) {
+      if (!freshIds.has(tracks[index].id)) continue;
+      const familiar = tracks.findIndex((track, at) => at >= DAILY_FAMILIAR_OPENING && !freshIds.has(track.id));
+      if (familiar < 0) break;
+      [tracks[index], tracks[familiar]] = [tracks[familiar], tracks[index]];
+    }
+  } else if (slot === "evening") {
+    const opening = tracks.slice(0, DAILY_FAMILIAR_OPENING);
+    if (opening.length && !opening.some((track) => freshIds.has(track.id))) {
+      const freshAt = tracks.findIndex((track, at) => at >= DAILY_FAMILIAR_OPENING && freshIds.has(track.id));
+      if (freshAt >= 0) {
+        const last = DAILY_FAMILIAR_OPENING - 1;
+        [tracks[last], tracks[freshAt]] = [tracks[freshAt], tracks[last]];
+      }
     }
   }
-  const tracks = shuffled(picked, seededRandom(host.crypto.md5(key))).map(toTrack);
-  const covered = tracks.findIndex((track) => track.album && track.album.imageUrl);
+  // A song with a cover leads the list, since the first row shows it best. A
+  // morning keeps to a familiar one so its opening stays the familiar songs.
+  let covered = -1;
+  if (slot === "morning") {
+    covered = tracks.findIndex((track) => track.album && track.album.imageUrl && !freshIds.has(track.id));
+  }
+  if (covered < 0) covered = tracks.findIndex((track) => track.album && track.album.imageUrl);
   if (covered > 0) tracks.unshift(...tracks.splice(covered, 1));
   store.set("dailyCache", JSON.stringify({ key, tracks }));
   return tracks;
@@ -662,7 +746,17 @@ export async function home() {
     soft(items({ IncludeItemTypes: "MusicArtist", Filters: "IsFavorite", SortBy: "SortName", Limit: 10 }), { Items: [] }),
   ]);
   const sections = [];
-  if (daily.length) sections.push({ title: t("Daily Mix"), tracks: daily, morePage: "daily" });
+  // No morePage: the card opens the section's own page, headed with the day
+  // over the first cover's colors and the date. The subtitle follows the song
+  // count there, keeping the time of day.
+  if (daily.length) {
+    sections.push({
+      title: t("Daily Mix"),
+      pageTitle: t("Daily Mix"),
+      subtitle: slotLabel(slotOf(), lang()),
+      tracks: daily,
+    });
+  }
   const likedTracks = itemsOf(likedTracksData).map(toTrack);
   if (likedTracks.length) sections.push({ title: t("Favorite Songs"), tracks: likedTracks, morePage: "favorites" });
   const albums = itemsOf(newest).map(toAlbum);
@@ -899,12 +993,38 @@ export async function recent() {
   return itemsOf(data).map(toTrack);
 }
 
+const SLOT_PLAYS_MAX = 500;
+
+function slotPlays() {
+  try {
+    const counts = JSON.parse(store.get("slotPlays", ""));
+    return counts && typeof counts === "object" ? counts : {};
+  } catch {
+    return {};
+  }
+}
+
+// rememberSlotPlay counts each song's plays by the time of day they happened,
+// so the mix can later learn what suits a morning or an evening. Nothing reads
+// these counts yet.
+function rememberSlotPlay(id) {
+  const counts = slotPlays();
+  const entry = counts[id] && typeof counts[id] === "object" ? counts[id] : {};
+  const slot = slotOf();
+  entry[slot] = (Number(entry[slot]) || 0) + 1;
+  counts[id] = entry;
+  const ids = Object.keys(counts);
+  for (const old of ids.slice(0, Math.max(0, ids.length - SLOT_PLAYS_MAX))) delete counts[old];
+  store.set("slotPlays", JSON.stringify(counts));
+}
+
 // played tells Emby the song played, so its play count and the day it last
 // played move without it streaming the audio itself.
 export async function played({ id }) {
   const current = token();
   const userId = currentUserId();
   if (!current || !userId || !id) return;
+  rememberSlotPlay(String(id));
   try {
     await request(`/Users/${encodeURIComponent(userId)}/PlayedItems/${encodeURIComponent(String(id))}`, { method: "POST" });
   } catch (error) {
