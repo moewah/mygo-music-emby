@@ -98,7 +98,7 @@ function deviceId() {
 }
 
 function clientHeader() {
-  return `MediaBrowser Client="MyGo Music", Device="MyGo Music", DeviceId="${deviceId()}", Version="0.1.0"`;
+  return `MediaBrowser Client="MyGo Music", Device="MyGo Music", DeviceId="${deviceId()}", Version="0.2.0"`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1168,7 +1168,7 @@ const LYRICS_SOURCES = [
   { name: "vkeys", find: vkeysLyrics },
   { name: "lrcmux", find: lrcmuxLyrics },
 ];
-const LYRICS_AGENT = "MyGo Music Emby plugin/0.1.0 (https://github.com/moewah/mygo-music-emby)";
+const LYRICS_AGENT = "MyGo Music Emby plugin/0.2.0 (https://github.com/moewah/mygo-music-emby)";
 const LYRICS_TIMEOUT = 5000;
 const LYRICS_DEADLINE = 20000;
 const LYRICS_MAX = 300;
