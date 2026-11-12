@@ -56,6 +56,46 @@ function userImage(id, tag) {
   return `http://emby.test:8096/emby/Users/${id}/Images/Primary?maxWidth=%7Bsize%7D&maxHeight=%7Bsize%7D${tag ? `&tag=${tag}` : ""}`;
 }
 
+// freeze pins the plugin's clock to a local hour, so a mix's slot is known.
+function freeze(hour, minute = 0) {
+  const date = new Date(2026, 10, 13, hour, minute);
+  globalThis.host.now = () => date.getTime();
+}
+
+// mixItem is a song shaped for the daily mix's pools.
+function mixItem(id, artist, album = `album-${id}`, cover = false) {
+  return {
+    Id: id,
+    Name: id,
+    AlbumId: album,
+    Album: album,
+    ArtistItems: [{ Id: artist, Name: artist }],
+    RunTimeTicks: 10000000,
+    ...(cover ? { AlbumPrimaryImageTag: `tag-${id}` } : {}),
+  };
+}
+
+// dailySource answers the daily mix's queries from the pools it's given.
+function dailySource({ top = [], favorites = [], mix = [], recent = [], random = [] }) {
+  return (url) => {
+    if (url.pathname === "/emby/Items/seed1/InstantMix") return { status: 200, body: { Items: mix } };
+    assert.equal(url.pathname, "/emby/Users/u1/Items");
+    const params = url.searchParams;
+    if (params.get("IncludeItemTypes") === "Audio") {
+      if (params.get("Filters") === "IsPlayed") return { status: 200, body: { Items: top } };
+      if (params.get("Filters") === "IsFavorite") return { status: 200, body: { Items: favorites } };
+      if (params.get("Filters") === "IsUnplayed" && params.get("SortBy") === "PremiereDate") {
+        return { status: 200, body: { Items: recent } };
+      }
+      if (params.get("Filters") === "IsUnplayed") return { status: 200, body: { Items: random } };
+    }
+    if (params.get("IncludeItemTypes") === "MusicAlbum" && params.get("Filters") === "IsFavorite") {
+      return { status: 200, body: { Items: [{ Id: "seed1" }] } };
+    }
+    return { status: 200, body: { Items: [] } };
+  };
+}
+
 beforeEach(() => {
   calls.length = 0;
   storage.clear();
@@ -63,6 +103,7 @@ beforeEach(() => {
   settings.username = "alice";
   settings.password = "secret";
   delete settings.apiKey;
+  delete globalThis.host.now;
   handler = () => ({ status: 200, body: {} });
 });
 
@@ -110,9 +151,11 @@ test("signing in with an API key finds the user behind it", async () => {
 
 test("changing the server forgets the session", () => {
   signedIn();
+  storage.set("slotPlays", "{}");
   plugin.setSetting({ key: "server", value: "http://elsewhere" });
   assert.equal(plugin.account(), null);
   assert.equal(storage.has("token"), false);
+  assert.equal(storage.has("slotPlays"), false);
 });
 
 test("search maps items and carries the page offset", async () => {
@@ -371,7 +414,7 @@ test("home leads with the daily mix, then favorite songs, recent and favorite al
   assert.equal(home.sections[2].morePage, "recent");
   assert.equal(home.sections[3].morePage, "favoriteAlbums");
   assert.equal(home.sections[4].morePage, "artists");
-  assert.equal(home.sections[0].tracks[0].id, "t1");
+  assert.deepEqual(home.sections[0].tracks.map((track) => track.id).sort(), ["fav1", "t1"]);
   assert.equal(home.sections[1].tracks[0].id, "fav1");
   assert.equal(home.sections[2].albums[0].name, "New");
   assert.equal(home.sections[3].albums[0].name, "Favorite");
@@ -380,6 +423,7 @@ test("home leads with the daily mix, then favorite songs, recent and favorite al
 
 test("the daily mix is made once and shared by home and its page", async () => {
   signedIn();
+  freeze(8);
   let unplayed = 0;
   handler = (url) => {
     const params = url.searchParams;
@@ -395,16 +439,17 @@ test("the daily mix is made once and shared by home and its page", async () => {
   };
 
   const first = await plugin.browse({ page: "daily" });
-  assert.equal(unplayed, 1);
+  assert.equal(unplayed, 2);
   const second = await plugin.browse({ page: "daily" });
-  assert.equal(unplayed, 1);
+  assert.equal(unplayed, 2);
   assert.deepEqual(
     second.sections[0].tracks.map((track) => track.id),
     first.sections[0].tracks.map((track) => track.id),
   );
   assert.ok(first.sections[0].tracks.some((track) => track.id === "fresh"));
-  // The page is headed with the day, plainly, as Frequently Played is.
-  assert.match(first.subtitle, /^[A-Z][a-z]+, [A-Z][a-z]+ \d+$/);
+  // The page is headed with the day and the slot, plainly, as Frequently
+  // Played is.
+  assert.match(first.subtitle, /^[A-Z][a-z]+, [A-Z][a-z]+ \d+ · Morning mix$/);
   assert.equal(first.imageUrl, undefined);
   assert.ok(first.description.includes("new every day"));
 });
@@ -427,6 +472,99 @@ test("the daily mix fills forty songs and repeats none", async () => {
   const ids = page.sections[0].tracks.map((track) => track.id);
   assert.equal(ids.length, 40);
   assert.equal(new Set(ids).size, 40);
+});
+
+test("the daily mix opens with familiar songs in the morning and a new one at night", async () => {
+  signedIn();
+  const top = Array.from({ length: 12 }, (_, index) => mixItem(`p${index}`, `ap${index}`));
+  const favorites = Array.from({ length: 12 }, (_, index) => mixItem(`f${index}`, `af${index}`));
+  const mix = Array.from({ length: 20 }, (_, index) => mixItem(`m${index}`, `am${index}`));
+  const recent = Array.from({ length: 20 }, (_, index) => mixItem(`n${index}`, `an${index}`));
+  const fresh = new Set(recent.map((item) => item.Id));
+  handler = dailySource({ top, favorites, mix, recent });
+
+  freeze(8);
+  const morning = await plugin.browse({ page: "daily" });
+  const morningTracks = morning.sections[0].tracks;
+  assert.equal(morningTracks.length, 40);
+  assert.ok(morningTracks.slice(0, 5).every((track) => !fresh.has(track.id)));
+  assert.equal(morningTracks.filter((track) => fresh.has(track.id)).length, 8);
+  assert.match(morning.subtitle, / · Morning mix$/);
+
+  freeze(20);
+  const evening = await plugin.browse({ page: "daily" });
+  const eveningTracks = evening.sections[0].tracks;
+  assert.equal(eveningTracks.length, 40);
+  assert.ok(eveningTracks.slice(0, 5).some((track) => fresh.has(track.id)));
+  assert.equal(eveningTracks.filter((track) => fresh.has(track.id)).length, 16);
+  assert.match(evening.subtitle, / · Evening mix$/);
+});
+
+test("the daily mix keeps one artist or album from taking it over", async () => {
+  signedIn();
+  freeze(9);
+  // One artist has five songs and one album is shared by three artists, while
+  // the rest of the pools can still fill forty songs on their own.
+  const top = [
+    ...Array.from({ length: 5 }, (_, index) => mixItem(`hot${index}`, "hot-artist")),
+    ...Array.from({ length: 3 }, (_, index) => mixItem(`shared${index}`, `shared-artist-${index}`, "shared-album")),
+    ...Array.from({ length: 10 }, (_, index) => mixItem(`p${index}`, `ap${index}`)),
+  ];
+  handler = dailySource({
+    top,
+    favorites: Array.from({ length: 10 }, (_, index) => mixItem(`f${index}`, `af${index}`)),
+    mix: Array.from({ length: 12 }, (_, index) => mixItem(`m${index}`, `am${index}`)),
+    recent: Array.from({ length: 8 }, (_, index) => mixItem(`n${index}`, `an${index}`)),
+  });
+
+  const tracks = (await plugin.browse({ page: "daily" })).sections[0].tracks;
+  assert.equal(tracks.length, 40);
+  assert.equal(tracks.filter((track) => track.artists[0].id === "hot-artist").length, 2);
+  assert.equal(tracks.filter((track) => track.album.id === "shared-album").length, 2);
+  const counts = new Map();
+  for (const track of tracks) counts.set(track.artists[0].id, (counts.get(track.artists[0].id) || 0) + 1);
+  assert.ok([...counts.values()].every((count) => count <= 2));
+});
+
+test("new songs are the latest released ones, with a random fallback", async () => {
+  signedIn();
+  freeze(9);
+  const queried = [];
+  handler = (url) => {
+    if (url.pathname === "/emby/Items/seed1/InstantMix") return { status: 200, body: { Items: [] } };
+    assert.equal(url.pathname, "/emby/Users/u1/Items");
+    const params = url.searchParams;
+    if (params.get("IncludeItemTypes") === "Audio" && params.get("Filters") === "IsUnplayed") {
+      queried.push({ sort: params.get("SortBy"), order: params.get("SortOrder"), limit: params.get("Limit") });
+      if (params.get("SortBy") === "Random") {
+        return { status: 200, body: { Items: [mixItem("fallback", "fallback-artist")] } };
+      }
+    }
+    if (params.get("IncludeItemTypes") === "MusicAlbum" && params.get("Filters") === "IsFavorite") {
+      return { status: 200, body: { Items: [{ Id: "seed1" }] } };
+    }
+    return { status: 200, body: { Items: [] } };
+  };
+
+  const page = await plugin.browse({ page: "daily" });
+  const latest = queried.find((query) => query.sort === "PremiereDate");
+  const random = queried.find((query) => query.sort === "Random");
+  assert.deepEqual(latest, { sort: "PremiereDate", order: "Descending", limit: "100" });
+  assert.deepEqual(random, { sort: "Random", order: null, limit: "40" });
+  assert.deepEqual(page.sections[0].tracks.map((track) => track.id), ["fallback"]);
+});
+
+test("a play is counted for the time of day it happened", async () => {
+  signedIn();
+  freeze(21);
+  handler = () => ({ status: 200, body: {} });
+  await plugin.played({ id: "t1" });
+  await plugin.played({ id: "t1" });
+  assert.deepEqual(JSON.parse(storage.get("slotPlays")), { t1: { evening: 2 } });
+
+  freeze(8);
+  await plugin.played({ id: "t2" });
+  assert.deepEqual(JSON.parse(storage.get("slotPlays")), { t1: { evening: 2 }, t2: { morning: 1 } });
 });
 
 test("the favorites page lists every liked song", async () => {
