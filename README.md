@@ -26,9 +26,17 @@
 - 收藏：喜欢的歌曲、喜欢的专辑、关注艺术家；以及“我的页面”汇总。
 - 播放列表：创建、重命名、删除，添加、移除和排序歌曲。
 - 播放：原文件直传；播放器不支持的格式自动转成 MP3；播放后会把歌曲标记为已播放，Emby 的播放次数和最近播放保持同步。
-- 歌词：播放时自动获取同步歌词，优先 [LRCLIB](https://lrclib.net)，未命中时回退 [lrcmux](https://lrcmux.dev)；结果缓存在本地，没找到的歌曲三天内不会重复请求。
+- 歌词：播放时自动获取同步歌词，依次尝试 [LRCLIB](https://lrclib.net)、[Vkeys](https://doc.vkeys.cn)（QQ 音乐）和 [lrcmux](https://lrcmux.dev)；结果缓存在本地，没找到的歌曲三天内不会重复请求。
 - 音质：标准档请求 128 kbps，高音质档 320 kbps，无损档优先原文件。
 - 界面支持简体中文和英文。
+
+## 截图
+
+<p align="center">
+  <img src="screenshots/lyrics.webp" width="32%" alt="播放页歌词" />
+  <img src="screenshots/albums.webp" width="32%" alt="所有专辑" />
+  <img src="screenshots/now-playing.webp" width="32%" alt="全屏歌词" />
+</p>
 
 ## 账号与权限
 
@@ -36,7 +44,7 @@
 - 插件用 `X-Emby-Token` 请求头访问 API；图片和音频请求同样通过 `requestHeaders` 携带令牌，不把令牌写进 URL。
 - 账号密码由 MyGo Music 明文保存在插件设置中，API 密钥和访问令牌保存在插件数据目录中。建议使用 HTTPS，并为插件单独创建一个 Emby 用户。
 - API 密钥是服务器级凭据，部分用户级操作（例如修改收藏、编辑播放列表）可能被 Emby 拒绝。需要这些功能时请使用用户名和密码登录。
-- 歌词查询会把歌曲名、歌手、专辑和时长发送到 `lrclib.net` 与 `api.lrcmux.dev`，不会发送账号信息；歌词结果保存在插件数据目录中，退出登录时清除。
+- 歌词查询会把歌曲名、歌手、专辑和时长发送到 `lrclib.net`、`api.vkeys.cn` 与 `api.lrcmux.dev`，不会发送账号信息；歌词结果保存在插件数据目录中，退出登录时清除。
 
 ## 开发
 
@@ -58,3 +66,5 @@ ln -sfn "$PWD" "$HOME/Library/Application Support/MyGo Music/plugins/emby"
 ## 许可证
 
 [GNU Affero General Public License v3.0](LICENSE)（AGPL-3.0-only）。Copyright © 2026 MoeWah。
+
+插件中包含由 [OpenCC](https://github.com/BYVoid/OpenCC)（Apache-2.0）的繁简字表生成的字对数据，用于匹配以繁体入库的曲目，详见 [NOTICE](NOTICE)。
