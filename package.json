@@ -1,6 +1,6 @@
 {
   "name": "mygo-music-emby",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "An Emby music source for MyGo Music.",
   "license": "AGPL-3.0-only",
   "private": true,
