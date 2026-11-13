@@ -44,7 +44,7 @@
     { "title": "Frequently Played", "page": "frequent", "icon": "chart" },
     { "title": "All Albums", "page": "albums", "icon": "album" },
     { "title": "Favorite Songs", "builtin": "liked" },
-    { "title": "Favorite Albums", "builtin": "savedAlbums" },
+    { "title": "Favorite Albums", "page": "favoriteAlbums", "icon": "album" },
     { "title": "Followed Artists", "page": "artists", "icon": "artist" }
   ]
 }
