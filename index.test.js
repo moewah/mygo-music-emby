@@ -924,3 +924,39 @@ test("a track with no lyrics is asked for once", async () => {
   assert.deepEqual(await plugin.lyrics({ id: "t1" }), {});
   assert.equal(asked, 4);
 });
+
+test("a failed LRCLIB lookup still tries its search", async () => {
+  signedIn();
+  handler = (url) => {
+    if (url.hostname === "emby.test") return trackItem();
+    assert.equal(url.hostname, "lrclib.net");
+    if (url.pathname === "/api/get") throw new Error("network down");
+    assert.equal(url.pathname, "/api/search");
+    return {
+      status: 200,
+      body: [{ trackName: "Test Song", artistName: "Test Artist", duration: 200, syncedLyrics: "[00:03.00]Right" }],
+    };
+  };
+
+  const page = await plugin.lyrics({ id: "t1" });
+  assert.equal(page.lrc, "[00:03.00]Right");
+});
+
+test("a lookup that failed isn't remembered as no lyrics", async () => {
+  signedIn();
+  let down = true;
+  handler = (url) => {
+    if (url.hostname === "emby.test") return trackItem();
+    if (down) throw new Error("network down");
+    assert.equal(url.hostname, "lrclib.net");
+    return {
+      status: 200,
+      body: { trackName: "Test Song", artistName: "Test Artist", duration: 200, syncedLyrics: "[00:01.00]Back" },
+    };
+  };
+
+  assert.deepEqual(await plugin.lyrics({ id: "t1" }), {});
+  down = false;
+  const page = await plugin.lyrics({ id: "t1" });
+  assert.equal(page.lrc, "[00:01.00]Back");
+});
