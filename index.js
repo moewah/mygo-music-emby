@@ -1346,15 +1346,23 @@ async function within(promise, ms) {
   }
 }
 
-async function lyricsResponse(url) {
+// lyricsWait is how long a request may take: no more than LYRICS_TIMEOUT, and
+// no longer than the chain has left of its deadline.
+function lyricsWait(until) {
+  return Math.min(LYRICS_TIMEOUT, until - Date.now());
+}
+
+async function lyricsResponse(url, until) {
+  const wait = lyricsWait(until);
+  if (wait <= 0) throw new Error("out of time");
   return within(
     fetch(url, { headers: { Accept: "application/json, text/plain", "User-Agent": LYRICS_AGENT } }),
-    LYRICS_TIMEOUT,
+    wait,
   );
 }
 
-async function lyricsJson(url) {
-  const response = await lyricsResponse(url);
+async function lyricsJson(url, until) {
+  const response = await lyricsResponse(url, until);
   if (!response.ok) return null;
   try {
     return await response.json();
@@ -1363,8 +1371,8 @@ async function lyricsJson(url) {
   }
 }
 
-async function lyricsText(url) {
-  const response = await lyricsResponse(url);
+async function lyricsText(url, until) {
+  const response = await lyricsResponse(url, until);
   if (!response.ok) return "";
   try {
     return await response.text();
@@ -1411,11 +1419,11 @@ function lyricsScore(candidate, info) {
   return score;
 }
 
-async function lrclibSearch(trackName, artistName) {
+async function lrclibSearch(trackName, artistName, until) {
   const found = await lyricsJson(`https://lrclib.net/api/search${queryString({
     track_name: trackName,
     artist_name: artistName,
-  })}`);
+  })}`, until);
   return Array.isArray(found) ? found : [];
 }
 
@@ -1435,32 +1443,53 @@ function bestLrc(candidates, info) {
   return bestScore >= 5 ? best : "";
 }
 
-async function lrclibLyrics(info) {
-  const exact = await lyricsJson(`https://lrclib.net/api/get${queryString({
-    track_name: info.title,
-    artist_name: info.artist,
-    album_name: info.album,
-    duration: info.duration || undefined,
-  })}`);
+async function lrclibLyrics(info, until) {
+  // A request that fails or runs out of time leaves the rest of the source
+  // worth trying: the search is quicker than the exact lookup, and often has
+  // what the lookup was too slow to answer.
+  let unsure = false;
+  const attempt = async (step) => {
+    try {
+      return await step();
+    } catch {
+      unsure = true;
+      return null;
+    }
+  };
+  const exact = await attempt(() =>
+    lyricsJson(`https://lrclib.net/api/get${queryString({
+      track_name: info.title,
+      artist_name: info.artist,
+      album_name: info.album,
+      duration: info.duration || undefined,
+    })}`, until),
+  );
   if (exact && pick(exact, "instrumental", false)) return "";
   const exactLrc = timedLrc(pick(exact || {}, "syncedLyrics", ""));
   if (exactLrc) return exactLrc;
   const title = info.title;
   const artist = info.firstArtist || info.artist;
-  const lrc = bestLrc(await lrclibSearch(title, artist), info);
+  const lrc = bestLrc((await attempt(() => lrclibSearch(title, artist, until))) || [], info);
   if (lrc) return lrc;
   // A library catalogued in traditional characters finds nothing above.
   const simpleTitle = simplified(title);
   const simpleArtist = simplified(artist);
-  if (simpleTitle === title && simpleArtist === artist) return "";
-  return bestLrc(await lrclibSearch(simpleTitle, simpleArtist), info);
+  if (simpleTitle === title && simpleArtist === artist) return unsure ? null : "";
+  const simpleLrc = bestLrc((await attempt(() => lrclibSearch(simpleTitle, simpleArtist, until))) || [], info);
+  if (simpleLrc) return simpleLrc;
+  return unsure ? null : "";
 }
 
-async function vkeysLyrics(info) {
-  const search = await lyricsJson(`https://api.vkeys.cn/v2/music/tencent/search/song${queryString({
-    word: [info.title, info.firstArtist || info.artist].filter(Boolean).join(" "),
-    num: 20,
-  })}`);
+async function vkeysLyrics(info, until) {
+  let search;
+  try {
+    search = await lyricsJson(`https://api.vkeys.cn/v2/music/tencent/search/song${queryString({
+      word: [info.title, info.firstArtist || info.artist].filter(Boolean).join(" "),
+      num: 20,
+    })}`, until);
+  } catch {
+    return null;
+  }
   const results = pick(search || {}, "data", []);
   if (!Array.isArray(results) || !results.length) return "";
   let best = null;
@@ -1477,13 +1506,18 @@ async function vkeysLyrics(info) {
     }
   }
   if (!best || bestScore < 5) return "";
-  const lyric = await lyricsJson(`https://api.vkeys.cn/v2/music/tencent/lyric${queryString({
-    id: pick(best, "id", undefined) || pick(best, "mid", undefined),
-  })}`);
+  let lyric;
+  try {
+    lyric = await lyricsJson(`https://api.vkeys.cn/v2/music/tencent/lyric${queryString({
+      id: pick(best, "id", undefined) || pick(best, "mid", undefined),
+    })}`, until);
+  } catch {
+    return null;
+  }
   return timedLrc(pick(pick(lyric || {}, "data", {}) || {}, "lrc", ""));
 }
 
-async function lrcmuxLyrics(info) {
+async function lrcmuxLyrics(info, until) {
   const fetchLrc = async (title, artist, album) => {
     const text = await lyricsText(`https://api.lrcmux.dev/get${queryString({
       artist,
@@ -1493,7 +1527,7 @@ async function lrcmuxLyrics(info) {
       level: "line",
       strict: "true",
       format: "lrc",
-    })}`);
+    })}`, until);
     return timedLrc(text);
   };
   const artist = info.firstArtist || info.artist;
@@ -1505,18 +1539,26 @@ async function lrcmuxLyrics(info) {
   return fetchLrc(simpleTitle, simpleArtist, simplified(info.album));
 }
 
+// findLyrics asks each source in turn. A source that can't answer in time says
+// null, and the chain remembers that it was unsure: the words may be there on
+// another try.
 async function findLyrics(info) {
   const until = Date.now() + LYRICS_DEADLINE;
+  let unsure = false;
   for (const source of LYRICS_SOURCES) {
-    if (Date.now() > until) break;
+    if (Date.now() >= until) {
+      unsure = true;
+      break;
+    }
     try {
-      const lrc = await source.find(info);
-      if (lrc) return { lrc, source: source.name };
+      const lrc = await source.find(info, until);
+      if (lrc) return { lrc, source: source.name, unsure: false };
+      if (lrc === null) unsure = true;
     } catch {
-      // Try the next source.
+      unsure = true;
     }
   }
-  return null;
+  return { lrc: "", source: "", unsure };
 }
 
 function lyricsKey(id) {
@@ -1594,6 +1636,8 @@ export async function lyrics({ id }) {
   const info = lyricsInfo(item);
   if (!info.title) return {};
   const found = await findLyrics(info);
-  rememberLyrics(id, found ? found.lrc : "", found ? found.source : "");
-  return found ? { lrc: found.lrc } : {};
+  // Only a definite miss is remembered; one the sources couldn't answer is
+  // asked again the next time the track plays.
+  if (found.lrc || !found.unsure) rememberLyrics(id, found.lrc, found.source);
+  return found.lrc ? { lrc: found.lrc } : {};
 }
