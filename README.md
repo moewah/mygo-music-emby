@@ -8,7 +8,7 @@
 
 需要 MyGo Music **0.1.24 或更新版本**。
 
-1. 打开 MyGo Music → **设置 → 插件 → + → 从文件夹安装**，选择本目录。
+1. 打开 MyGo Music → **插件 → + → 从文件夹安装**，选择本目录。
 2. 在插件设置中填写：
    - **服务器地址**：包含协议和端口，例如 `http://192.168.1.10:8096`；也可以填 `https://emby.example.com`。部署在子路径时填完整地址，例如 `https://example.com/emby`。
    - **用户名 / 密码**：Emby 账号，点击来源选择器里的**登录**完成验证。
@@ -61,7 +61,7 @@ npm test
 ln -sfn "$PWD" "$HOME/Library/Application Support/MyGo Music/plugins/emby"
 ```
 
-重启 MyGo Music 后，在 **设置 → 插件** 中启用。
+重启 MyGo Music 后，在 **插件** 页面中启用。
 
 ## 许可证
 
